@@ -1,0 +1,91 @@
+---
+title: "Calculate allele promiscuity"
+author: "Mate Manczinger"
+date: '2020.08.25.'
+output:
+  word_document:
+    reference_docx: "style.docx"
+---
+
+
+## 1. Initialize
+
+```{r echo=TRUE}
+kl_cutoff = 400 #the minimum number of bound sequences to include the allele in the analysis
+normalize = T
+
+library(protr)
+library(Rtreemix)
+
+```
+
+## 2 Calculate promiscuity
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+load("mhc_ligands.RData") #loading MHC ligand data collected from the IEDB database
+load("aa_prevalence_in_human_proteins.RData") #loading amino acid prevelnce data in different positions of all 8-12-mers in the human proteome
+load("expected_KL_divergence.RData") #expected KL values when taking N random samples from the human proteome 
+
+alleles = table(mhc_ligand$`Allele Name`) #collect number of sequences for a given allele
+alleles = alleles[order(alleles)]
+promisc_iedb = matrix(NA, ncol = 10, nrow = length(alleles)) #create empty matrix for promiscuity calculation
+colnames(promisc_iedb) = c(paste0("KL-divergence for ", 8:12, "-mer sequences"), paste0("number of ", 8:12, "-mer sequences"))
+rownames(promisc_iedb) = names(alleles)
+
+for(s in 8:12) { #carry out KL calculation separately for different sequence lengths
+  motifs = list() #generate object with amino acid prevalence information
+  for(i in 1 : length(alleles)) { #determine amino acid prevalence in bound sequences by each allele
+    temp = mhc_ligand$Description[mhc_ligand$`Allele Name` == names(alleles)[i]] #select sequences bound by the given allele
+    temp = toupper(temp[nchar(temp) == s]) #select sequences with "s" number of amino acids
+    promisc_iedb[i,s-2] = length(temp) #save the number of sequences in the matrix for promiscuity calculation 
+    if(length(mhc_ligand$Description[mhc_ligand$`Allele Name` == names(alleles)[i]]) >= kl_cutoff & length(temp) > 40) { #determine amino acid prevalence if number of allele-specific sequences is above cutoff and the number of sequences in the given length is above 40
+      temp = matrix(unlist(strsplit(temp, "")), ncol = s, byrow = TRUE) #decompose sequences to amino acids
+      stat = apply(temp, MARGIN = 2, FUN = table) #determine amino acid frequency at each position
+      if(is.matrix(stat) == TRUE) stat = lapply(seq_len(ncol(stat)), function(i) stat[,i]) #generate list from matrix (needed for next steps)
+      stat_fin = matrix(0, ncol = s, nrow = 20) #generate final matrix
+      rownames(stat_fin) = rownames(AABLOSUM62) #name matrix rows according to amino acids
+      for(j in 1 : length(stat)) stat_fin[names(stat[[j]]),j] = stat[[j]] #sort amino acid prevalence to final matrix
+      motifs[[i]] = stat_fin #put amino acid prevalence values into list
+    } else motifs[[i]] = NA
+  }
+  names(motifs) = names(alleles) #name elements of amino acid prevalence list
+  for(i in 1 : length(motifs)) { #determine KL-divergence for each allele
+    if(length(motifs[[i]]) > 1) {
+      entr = NULL #the loop will collect KL-divergence values at each position into the entr vector
+      for(j in 1 : s) { 
+        if(any(motifs[[i]][,j] == 0)) motifs[[i]][,j] = motifs[[i]][,j] + 0.0000001 #carrying out Laplace-smoothing when the denominator is 0 in formula
+        motifs[[i]][,j] = motifs[[i]][,j]/sum(motifs[[i]][,j]) #calculate the relative fraction of amino acids at each position
+        entr = c(entr, kullback.leibler(motifs[[i]][,j], stat_all[[s-7]][,j])) #calculate KL-divergence from random amino acids at the given position in human proteins
+      }
+      promisc_iedb[i,s-7] = mean(entr[entr >= 0.04]) # calcualte mean KL-divergence at positions with values larger than 0.04. This value represents non-random amino acid prevalence at these positions
+    }
+  }
+}
+
+rownames(promisc_iedb) = gsub("HLA-|\\*|:", "", names(alleles)) #simplify allele names
+promisc_iedb[,6:10] = t(apply(promisc_iedb, MARGIN = 1, FUN = function(x) { x[6:10][is.na(x[1:5]) == TRUE] = NA; return(x[6:10]) })) #delete seqeuence number data. when KL values were not calculated
+
+if (normalize == TRUE) { #normalize
+for(i in 1 : nrow(promisc_iedb)) {
+ for(j in 1 : 5) {
+   if(is.na(promisc_iedb[i,j]) == FALSE) {
+     minimum = seq(from = 20, to = 50000, by = 20) - promisc_iedb[i,j+5] #determine the closest random sample size to the examined one 
+     which = which.min(abs(minimum)) #determine the closest random sample size to the examined one
+     reference = kl[[j]][which, 2] #determine the closest random sample size to the examined one
+     if(minimum[which] < 0) { reference_2 = kl[[j]][which + 1, 2]; reference = reference - abs(reference-reference_2)*(abs(minimum[which])/20) } #interpolate 
+     if(minimum[which] > 0) { reference_2 = kl[[j]][which - 1, 2]; reference = reference + abs(reference-reference_2)*(abs(minimum[which])/20) } #interpolate
+     promisc_iedb[i,j] = promisc_iedb[i,j] - reference/2 #calculate normalized values
+   }
+ }
+}
+}
+
+promisc_iedb[,6:10] = t(apply(promisc_iedb[,6:10], MARGIN = 1, FUN = function(x) x/sum(x, na.rm = TRUE))) #calcaulte relative proportion of bound sequences with different lengths in the repertoire of each allele
+promisc_iedb = cbind(promisc_iedb, "KL-divergence" = apply(promisc_iedb[,1:10], MARGIN = 1, FUN = function(x) sum(as.numeric(x[1:5]) * as.numeric(x[6:10]), na.rm = TRUE))) #calcaulte the weighted mean of KL-divergence of bound sequences with different lengths 
+promisc_iedb = promisc_iedb[promisc_iedb[,11] > 0,] #filter for alleles with calcaulted KL-divergence
+
+promiscuity = 1/promisc_iedb[,"KL-divergence"] #calcaulte the reciprocal value of KL-divergence
+
+
+```
